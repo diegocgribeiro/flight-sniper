@@ -2,6 +2,10 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { logout } from "../actions";
 
+// App privado: toda página depende da sessão e do banco, então não há shell
+// estático útil para navegação instantânea.
+export const instant = false;
+
 export default function AppLayout({ children }: LayoutProps<"/">) {
   return (
     <div className="min-h-screen">

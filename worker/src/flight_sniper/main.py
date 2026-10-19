@@ -204,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout
     )
+    logging.getLogger("primp").setLevel(logging.WARNING)  # loga a URL de cada request
     return run(args.route_id, args.force, args.dry_run, args.trigger)
 
 
