@@ -6,20 +6,23 @@ const { routes, priceChecks, alerts, runs } = schema;
 
 /** Janela considerada "preço atual": o resultado mais recente de cada combinação nas últimas 48h. */
 const FRESH = sql`now() - interval '48 hours'`;
+const ROUTE_ID = sql.raw(`"routes"."id"`);
 
 export async function listRoutesWithStats() {
   const rows = await db()
     .select({
       route: routes,
+      // Referência qualificada: dentro da subconsulta, ${routes.id} vira só "id"
+      // e o Postgres resolve para a coluna id da própria tabela da subconsulta.
       bestNow: sql<string | null>`(
         select min(pc.price) from ${priceChecks} pc
-        where pc.route_id = ${routes.id} and pc.checked_at > ${FRESH}
+        where pc.route_id = ${ROUTE_ID} and pc.checked_at > ${FRESH}
       )`,
       bestEver: sql<string | null>`(
-        select min(pc.price) from ${priceChecks} pc where pc.route_id = ${routes.id}
+        select min(pc.price) from ${priceChecks} pc where pc.route_id = ${ROUTE_ID}
       )`,
       lastAlertAt: sql<string | null>`(
-        select max(a.sent_at) from ${alerts} a where a.route_id = ${routes.id}
+        select max(a.sent_at) from ${alerts} a where a.route_id = ${ROUTE_ID}
       )`,
     })
     .from(routes)
