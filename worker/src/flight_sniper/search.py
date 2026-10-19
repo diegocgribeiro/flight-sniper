@@ -7,9 +7,17 @@ import time
 from decimal import Decimal
 from typing import Any
 
-from fast_flights import FlightQuery, FlightsNotFound, Passengers, create_query, get_flights
+from fast_flights import (
+    FlightQuery,
+    FlightsNotFound,
+    Passengers,
+    create_query,
+    fetch_flights_html,
+    get_flights,
+)
 
 from .models import Combo, Offer, Route
+from .tolerant_parser import parse_html
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +88,18 @@ def search_combo(route: Route, combo: Combo) -> Offer | None:
             break
         except FlightsNotFound:
             return None
+        except (IndexError, KeyError, TypeError) as exc:
+            # Payload com algum itinerário incompleto: relê ignorando só os malformados.
+            logger.info("Parser padrão falhou em %s (%s); usando parser tolerante", combo, exc)
+            try:
+                results = parse_html(fetch_flights_html(query))
+                break
+            except FlightsNotFound:
+                return None
+            except Exception as exc2:
+                last_exc = exc2
+                if attempt < len(RETRY_BACKOFF_SECONDS):
+                    time.sleep(RETRY_BACKOFF_SECONDS[attempt])
         except Exception as exc:  # rede, bloqueio, mudança no HTML
             last_exc = exc
             if attempt < len(RETRY_BACKOFF_SECONDS):
