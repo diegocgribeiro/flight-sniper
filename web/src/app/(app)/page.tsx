@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { RunNowButton } from "@/components/run-now-button";
-import { describeDates, describeSchedule, fmtDateTime, money, timeAgo } from "@/lib/format";
+import { describeDates, describeSchedule, fmtDateTime, fmtNextCheck, money, nextCheck, timeAgo } from "@/lib/format";
 import { listRoutesWithStats, recentRuns } from "@/lib/queries";
 import { requireSession } from "@/lib/session";
 
@@ -29,8 +29,8 @@ export default async function Dashboard() {
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {rows.map(({ route: r, bestNow, bestEver, lastAlertAt }) => {
-            const below = bestNow != null && Number(bestNow) < Number(r.targetPrice);
+          {rows.map(({ route: r, lastScan, bestEver, lastAlertAt }) => {
+            const below = lastScan != null && Number(lastScan) < Number(r.targetPrice);
             return (
               <Link key={r.id} href={`/routes/${r.id}`} className="card block p-5 transition hover:border-brand">
                 <div className="flex items-start justify-between gap-3">
@@ -47,9 +47,9 @@ export default async function Dashboard() {
                   </div>
                   <div className="text-right">
                     <div className={`tabular text-xl font-semibold ${below ? "text-good" : ""}`}>
-                      {money(bestNow, r.currency)}
+                      {money(lastScan, r.currency)}
                     </div>
-                    <div className="text-xs text-muted">alvo {money(r.targetPrice, r.currency)}</div>
+                    <div className="text-xs text-muted">última varredura · alvo {money(r.targetPrice, r.currency)}</div>
                   </div>
                 </div>
                 <div className="mt-4 space-y-1 text-sm text-muted">
@@ -58,6 +58,7 @@ export default async function Dashboard() {
                 </div>
                 <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 border-t border-line pt-3 text-xs text-muted">
                   <span>Checado: {fmtDateTime(r.lastCheckedAt)}</span>
+                  {r.active && <span>Próxima: {fmtNextCheck(nextCheck(r.schedule, r.lastCheckedAt))}</span>}
                   <span>Mínimo histórico: {money(bestEver, r.currency)}</span>
                   {lastAlertAt && <span>Último alerta: {timeAgo(lastAlertAt)}</span>}
                 </div>

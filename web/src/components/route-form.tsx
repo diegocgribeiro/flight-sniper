@@ -1,11 +1,12 @@
 "use client";
 
-import { useActionState, useMemo, useState } from "react";
-import { saveRoute, type FormState } from "@/app/actions";
+import { useActionState, useMemo, useState, useTransition } from "react";
+import { saveRoute, testNtfy, type FormState } from "@/app/actions";
+import { AirportPicker } from "@/components/airport-picker";
 import type { Route, ScheduleRule } from "@/db/schema";
 import { SCHEDULE_PRESETS, countDateCombos } from "@/lib/route-input";
 
-type Props = { route?: Route; defaultEmail?: string };
+type Props = { route?: Route; defaultEmail?: string; airportLabels?: Record<string, string> };
 
 const ROLLING_PRESETS = [
   { label: "1 mês", days: 30 },
@@ -71,7 +72,7 @@ function Segmented<T extends string>({
   );
 }
 
-export function RouteForm({ route, defaultEmail }: Props) {
+export function RouteForm({ route, defaultEmail, airportLabels = {} }: Props) {
   const action = saveRoute.bind(null, route?.id ?? null);
   const [state, formAction, pending] = useActionState<FormState, FormData>(action, undefined);
   const e = state?.errors ?? {};
@@ -83,17 +84,18 @@ export function RouteForm({ route, defaultEmail }: Props) {
   const [horizonDays, setHorizonDays] = useState<number>(route?.horizonDays ?? 180);
   const [minStay, setMinStay] = useState<number>(route?.minStayDays ?? 4);
   const [maxStay, setMaxStay] = useState<number>(route?.maxStayDays ?? 4);
-  const [origins, setOrigins] = useState(route?.origins.join(", ") ?? "");
-  const [destinations, setDestinations] = useState(route?.destinations.join(", ") ?? "");
+  const [origins, setOrigins] = useState<string[]>(route?.origins ?? []);
+  const [destinations, setDestinations] = useState<string[]>(route?.destinations ?? []);
+  const [ntfyTopic, setNtfyTopic] = useState(route?.ntfyTopic ?? "");
+  const [ntfyMsg, setNtfyMsg] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testing, startTest] = useTransition();
   const [maxQueries, setMaxQueries] = useState<number>(route?.maxQueriesPerRun ?? 60);
   const [schedule, setSchedule] = useState<ScheduleRule[]>(
     route?.schedule ?? SCHEDULE_PRESETS[0].rules,
   );
 
   const rt = tripType === "round_trip";
-  const airportPairs =
-    Math.max(1, origins.split(/[\s,;]+/).filter(Boolean).length) *
-    Math.max(1, destinations.split(/[\s,;]+/).filter(Boolean).length);
+  const airportPairs = Math.max(1, origins.length) * Math.max(1, destinations.length);
   const combos = useMemo(
     () =>
       countDateCombos({
@@ -107,8 +109,7 @@ export function RouteForm({ route, defaultEmail }: Props) {
       }) * airportPairs,
     [tripType, dateMode, windowStart, windowEnd, horizonDays, minStay, maxStay, airportPairs],
   );
-  const cycles = combos > 0 ? Math.ceil(combos / Math.max(1, maxQueries)) : 0;
-  const minEvery = Math.min(...schedule.map((s) => s.every));
+  const sampled = combos > maxQueries;
 
   const updateRule = (i: number, patch: Partial<ScheduleRule>) =>
     setSchedule((s) => s.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -123,24 +124,22 @@ export function RouteForm({ route, defaultEmail }: Props) {
           <input name="name" className="input" defaultValue={route?.name} placeholder="Réveillon em Lisboa" required />
         </Field>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Origem (IATA)" error={e.origins} hint="Separe por vírgula para várias: UDI, CNF">
-            <input
+          <Field label="Origem" error={e.origins} hint="Digite a cidade, o aeroporto ou o código (até 5)">
+            <AirportPicker
               name="origins"
-              className="input font-mono uppercase"
               value={origins}
-              onChange={(ev) => setOrigins(ev.target.value)}
-              placeholder="UDI"
-              required
+              onChange={setOrigins}
+              labels={airportLabels}
+              placeholder="Ex.: Uberlândia"
             />
           </Field>
-          <Field label="Destino (IATA)" error={e.destinations} hint="Ex.: LIS, OPO">
-            <input
+          <Field label="Destino" error={e.destinations} hint="Cidades com vários aeroportos podem entrar todos de uma vez">
+            <AirportPicker
               name="destinations"
-              className="input font-mono uppercase"
               value={destinations}
-              onChange={(ev) => setDestinations(ev.target.value)}
-              placeholder="GRU"
-              required
+              onChange={setDestinations}
+              labels={airportLabels}
+              placeholder="Ex.: São Paulo"
             />
           </Field>
         </div>
@@ -266,12 +265,18 @@ export function RouteForm({ route, defaultEmail }: Props) {
 
         {dateMode !== "fixed" && (
           <div className="rounded-lg bg-bg p-3 text-sm">
-            <b className="tabular">{combos.toLocaleString("pt-BR")}</b> combinações de datas/aeroportos.{" "}
+            <b className="tabular">{combos.toLocaleString("pt-BR")}</b> combinações possíveis de datas/aeroportos.{" "}
             {combos > 0 && (
               <span className="text-muted">
-                Com {maxQueries} buscas por execução, a cobertura completa leva{" "}
-                <b className="tabular">{cycles}</b> {cycles === 1 ? "execução" : "execuções"}
-                {cycles > 1 && ` (≈ ${Math.round((cycles * minEvery) / 24 * 10) / 10} dia(s) no intervalo mais curto)`}.
+                {sampled ? (
+                  <>
+                    Cada execução faz uma <b>amostra de {maxQueries} buscas</b> espalhada pelo período todo
+                    (idas distribuídas e durações alternadas), então a estimativa de preço sai já na primeira
+                    varredura.
+                  </>
+                ) : (
+                  <>Todas são buscadas em cada execução.</>
+                )}
               </span>
             )}
           </div>
@@ -318,7 +323,9 @@ export function RouteForm({ route, defaultEmail }: Props) {
       <section className="card space-y-4 p-5">
         <div>
           <h2 className="font-semibold">Frequência das buscas</h2>
-          <p className="text-sm text-muted">Horário de Brasília. O agendador roda de hora em hora e respeita estas faixas.</p>
+          <p className="text-sm text-muted">
+            Horário de Brasília, em horários cheios: &quot;a cada 2h das 6h às 24h&quot; busca às 6h, 8h, 10h…
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           {SCHEDULE_PRESETS.map((p) => (
@@ -387,7 +394,7 @@ export function RouteForm({ route, defaultEmail }: Props) {
           <Field
             label="Máx. de buscas por execução"
             error={e.maxQueriesPerRun}
-            hint="Cada busca leva ~1–2s. Combinações excedentes são cobertas nas próximas execuções."
+            hint="Cada busca leva ~2–3s. Acima disso, as datas viram uma amostra representativa."
           >
             <input
               type="number"
@@ -399,16 +406,45 @@ export function RouteForm({ route, defaultEmail }: Props) {
               onChange={(ev) => setMaxQueries(Number(ev.target.value))}
             />
           </Field>
-          <Field label="E-mail do alerta" error={e.notifyEmail} hint={defaultEmail ? `Padrão: ${defaultEmail}` : undefined}>
+          <Field label="E-mail do alerta" error={e.notifyEmail}>
             <input
               type="email"
               name="notifyEmail"
               className="input"
-              defaultValue={route?.notifyEmail ?? ""}
-              placeholder={defaultEmail ?? "voce@exemplo.com"}
+              defaultValue={route?.notifyEmail ?? defaultEmail ?? ""}
+              placeholder="voce@exemplo.com"
+              required
             />
           </Field>
         </div>
+        <Field
+          label="Tópico ntfy.sh (opcional)"
+          error={e.ntfyTopic}
+          hint="Notificação no celular além do e-mail. Instale o app ntfy, assine o mesmo tópico. Tópicos são públicos: use um nome difícil de adivinhar."
+        >
+          <div className="flex gap-2">
+            <input
+              name="ntfyTopic"
+              className="input font-mono"
+              value={ntfyTopic}
+              onChange={(ev) => {
+                setNtfyTopic(ev.target.value);
+                setNtfyMsg(null);
+              }}
+              placeholder="voos-diego-7k2p9"
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              className="btn-ghost shrink-0"
+              disabled={!ntfyTopic.trim() || testing}
+              onClick={() => startTest(async () => setNtfyMsg(await testNtfy(ntfyTopic)))}
+            >
+              {testing ? "Enviando…" : "Testar"}
+            </button>
+          </div>
+          {ntfyMsg && <p className={`mt-1 text-xs ${ntfyMsg.ok ? "text-good" : "text-bad"}`}>{ntfyMsg.message}</p>}
+        </Field>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" name="active" defaultChecked={route?.active ?? true} />
           Rota ativa

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -49,6 +49,8 @@ def _route_from_row(row: dict[str, Any]) -> Route:
         schedule=[ScheduleRule(int(r["from"]), int(r["to"]), int(r["every"])) for r in row["schedule"]],
         max_queries_per_run=row["max_queries_per_run"],
         notify_email=row["notify_email"],
+        ntfy_topic=row["ntfy_topic"],
+        alert_floor=None if row["alert_floor"] is None else Decimal(row["alert_floor"]),
         cursor=row["cursor"],
         last_checked_at=row["last_checked_at"],
     )
@@ -126,15 +128,9 @@ def mark_checked(
     )
 
 
-def recent_alert_min_price(
-    conn: psycopg.Connection[dict[str, Any]], route_id: int, window: timedelta
-) -> Decimal | None:
-    """Menor preço já alertado para a rota dentro da janela de cooldown."""
-    row = conn.execute(
-        "select min(best_price) as p from alerts where route_id = %s and sent_at > now() - %s",
-        (route_id, window),
-    ).fetchone()
-    return None if row is None or row["p"] is None else Decimal(row["p"])
+def set_alert_floor(conn: psycopg.Connection[dict[str, Any]], route_id: int, floor: Decimal | None) -> None:
+    """Grava o piso do episódio de alerta (``None`` encerra o episódio)."""
+    conn.execute("update routes set alert_floor = %s where id = %s", (floor, route_id))
 
 
 def insert_alert(
@@ -144,10 +140,12 @@ def insert_alert(
     offer: Offer,
     email_to: str,
     provider_id: str | None,
+    ntfy_topic: str | None,
 ) -> None:
     conn.execute(
-        """insert into alerts (route_id, run_id, best_price, depart_date, return_date, email_to, provider_id)
-           values (%s, %s, %s, %s, %s, %s, %s)""",
+        """insert into alerts (route_id, run_id, best_price, depart_date, return_date, email_to, provider_id,
+                               ntfy_topic)
+           values (%s, %s, %s, %s, %s, %s, %s, %s)""",
         (
             route_id,
             run_id,
@@ -156,6 +154,7 @@ def insert_alert(
             offer.combo.dates.ret,
             email_to,
             provider_id,
+            ntfy_topic,
         ),
     )
 

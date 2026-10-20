@@ -11,7 +11,8 @@ import {
   checkPassword,
   createSessionToken,
 } from "@/lib/auth";
-import { parseRouteForm, type RouteInput } from "@/lib/route-input";
+import { dispatchScan, type DispatchResult } from "@/lib/github";
+import { ntfyTopic, parseRouteForm, type RouteInput } from "@/lib/route-input";
 import { requireSession } from "@/lib/session";
 
 export type FormState = { errors?: Record<string, string[]>; message?: string } | undefined;
@@ -60,6 +61,7 @@ function toRow(r: RouteInput) {
     schedule: r.schedule,
     maxQueriesPerRun: r.maxQueriesPerRun,
     notifyEmail: r.notifyEmail,
+    ntfyTopic: r.ntfyTopic,
     active: r.active,
   };
 }
@@ -89,11 +91,16 @@ export async function saveRoute(
       .returning({ id: schema.routes.id });
     id = created.id;
   } else {
-    // mudança de datas invalida a janela rotativa
+    // Rota editada: meta/datas podem ter mudado, então recomeça o episódio de alerta.
     await db()
       .update(schema.routes)
-      .set({ ...row, cursor: 0, updatedAt: new Date() })
+      .set({ ...row, cursor: 0, alertFloor: null, updatedAt: new Date() })
       .where(eq(schema.routes.id, id));
+  }
+  // Já traz a primeira estimativa sem esperar o próximo horário agendado.
+  if (row.active) {
+    const res = await dispatchScan({ routeId: id, force: true, trigger: "new-route" });
+    if (!res.ok) console.warn("Varredura inicial não disparada:", res.message);
   }
   revalidatePath("/");
   redirect(`/routes/${id}`);
@@ -116,34 +123,29 @@ export async function deleteRoute(routeId: number) {
   redirect("/");
 }
 
-/**
- * Dispara o workflow do worker imediatamente (workflow_dispatch).
- * Requer GITHUB_DISPATCH_TOKEN (fine-grained, Actions: read & write) e GITHUB_REPO.
- */
-export async function runNow(routeId: number | null): Promise<{ ok: boolean; message: string }> {
+/** Dispara a varredura imediatamente (botão "Buscar agora"). */
+export async function runNow(routeId: number | null): Promise<DispatchResult> {
   await requireSession();
-  const token = process.env.GITHUB_DISPATCH_TOKEN;
-  const repo = process.env.GITHUB_REPO;
-  if (!token || !repo) {
-    return { ok: false, message: "Configure GITHUB_DISPATCH_TOKEN e GITHUB_REPO no Vercel." };
-  }
-  const res = await fetch(
-    `https://api.github.com/repos/${repo}/actions/workflows/check-prices.yml/dispatches`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      body: JSON.stringify({
-        ref: "main",
-        inputs: { route_id: routeId == null ? "" : String(routeId), force: "true" },
-      }),
-    },
-  );
-  if (!res.ok) {
-    return { ok: false, message: `GitHub respondeu ${res.status}: ${await res.text()}` };
-  }
-  return { ok: true, message: "Busca disparada! Os resultados aparecem em 1–3 minutos." };
+  return dispatchScan({ routeId, force: true, trigger: "manual" });
+}
+
+/** Envia uma notificação de teste para o tópico ntfy informado no formulário. */
+export async function testNtfy(topic: string): Promise<DispatchResult> {
+  await requireSession();
+  const parsed = ntfyTopic.safeParse(topic);
+  if (!parsed.success || !parsed.data) return { ok: false, message: "Tópico inválido" };
+  const server = (process.env.NTFY_SERVER ?? "https://ntfy.sh").replace(/\/$/, "");
+  const res = await fetch(`${server}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic: parsed.data,
+      title: "✈ Flight Sniper",
+      message: "Notificação de teste: os alertas desta rota chegarão aqui.",
+      tags: ["white_check_mark"],
+    }),
+  });
+  return res.ok
+    ? { ok: true, message: "Enviada! Confira o app do ntfy." }
+    : { ok: false, message: `ntfy respondeu ${res.status}` };
 }

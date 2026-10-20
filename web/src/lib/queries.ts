@@ -4,9 +4,13 @@ import { db, schema } from "@/db";
 
 const { routes, priceChecks, alerts, runs } = schema;
 
-/** Janela considerada "preço atual": o resultado mais recente de cada combinação nas últimas 48h. */
-const FRESH = sql`now() - interval '48 hours'`;
 const ROUTE_ID = sql.raw(`"routes"."id"`);
+
+/** run_id da varredura mais recente que gravou preços para a rota informada. */
+const lastRunOf = (routeId: unknown) => sql`(
+  select pc2.run_id from ${priceChecks} pc2
+  where pc2.route_id = ${routeId} order by pc2.checked_at desc limit 1
+)`;
 
 export async function listRoutesWithStats() {
   const rows = await db()
@@ -14,9 +18,10 @@ export async function listRoutesWithStats() {
       route: routes,
       // Referência qualificada: dentro da subconsulta, ${routes.id} vira só "id"
       // e o Postgres resolve para a coluna id da própria tabela da subconsulta.
-      bestNow: sql<string | null>`(
+      // Menor preço encontrado na última varredura da rota.
+      lastScan: sql<string | null>`(
         select min(pc.price) from ${priceChecks} pc
-        where pc.route_id = ${ROUTE_ID} and pc.checked_at > ${FRESH}
+        where pc.route_id = ${ROUTE_ID} and pc.run_id = ${lastRunOf(ROUTE_ID)}
       )`,
       bestEver: sql<string | null>`(
         select min(pc.price) from ${priceChecks} pc where pc.route_id = ${ROUTE_ID}
@@ -35,17 +40,13 @@ export async function getRoute(id: number) {
   return route ?? null;
 }
 
-/** Melhores opções atuais: última observação por combinação (48h), ordenadas por preço. */
-export async function currentBestOptions(routeId: number, limit = 12) {
+/** Resultados da última varredura da rota, do mais barato para o mais caro. */
+export async function lastScanOptions(routeId: number, limit = 12) {
   const res = await db().execute(sql`
-    select * from (
-      select distinct on (origin, destination, depart_date, return_date)
-        id, checked_at, origin, destination, depart_date, return_date, price, currency,
-        airlines, stops, duration_minutes, url
-      from ${priceChecks}
-      where route_id = ${routeId} and checked_at > ${FRESH}
-      order by origin, destination, depart_date, return_date, checked_at desc
-    ) latest
+    select id, checked_at, origin, destination, depart_date, return_date, price, currency,
+           airlines, stops, duration_minutes, url
+    from ${priceChecks}
+    where route_id = ${routeId} and run_id = ${lastRunOf(routeId)}
     order by price asc
     limit ${limit}
   `);
@@ -75,6 +76,12 @@ export async function dailyMinSeries(routeId: number, days = 30) {
     group by 1 order by 1
   `);
   return res.rows as { day: string; price: number }[];
+}
+
+/** Menor preço já visto para a rota (todo o histórico guardado). */
+export async function historicalMin(routeId: number) {
+  const res = await db().execute(sql`select min(price) as p from ${priceChecks} where route_id = ${routeId}`);
+  return (res.rows[0]?.p as string | null) ?? null;
 }
 
 export async function routeAlerts(routeId: number, limit = 10) {

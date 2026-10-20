@@ -2,9 +2,11 @@ name: check-prices
 
 on:
   schedule:
-    # De hora em hora (min. 7 para fugir do pico do minuto 0). Cada rota
-    # decide se está "na vez" pelas faixas de horário cadastradas no site.
-    - cron: "7 * * * *"
+    # Reserva: o `schedule` do GitHub atrasa horas ou pula execuções. O disparo
+    # pontual vem do cron-job.org → /api/cron do site → workflow_dispatch.
+    # Cada rota decide se está "na vez" pelo horário cadastrado, então disparos
+    # extras não duplicam buscas.
+    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       route_id:
@@ -15,6 +17,10 @@ on:
         description: "Ignorar agenda de horários"
         required: false
         default: "true"
+      trigger:
+        description: "Origem do disparo (manual/cron/new-route)"
+        required: false
+        default: "manual"
 
 # Nunca duas varreduras ao mesmo tempo (evita duplicar buscas e alertas).
 concurrency:
@@ -49,14 +55,22 @@ jobs:
           RESEND_FROM: ${{ vars.RESEND_FROM }}
           APP_URL: ${{ vars.APP_URL }}
           PYTHONIOENCODING: utf-8
+          # Inputs via env (não interpolados no script) para evitar injeção de shell.
+          EVENT: ${{ github.event_name }}
+          IN_ROUTE_ID: ${{ inputs.route_id }}
+          IN_FORCE: ${{ inputs.force }}
+          IN_TRIGGER: ${{ inputs.trigger }}
         run: |
-          ARGS=""
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ARGS="--trigger manual"
-            [ -n "${{ inputs.route_id }}" ] && ARGS="$ARGS --route-id ${{ inputs.route_id }}"
-            [ "${{ inputs.force }}" = "true" ] && ARGS="$ARGS --force"
+          ARGS=()
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            ARGS+=(--trigger "${IN_TRIGGER:-manual}")
+            if [ -n "$IN_ROUTE_ID" ]; then
+              [[ "$IN_ROUTE_ID" =~ ^[0-9]+$ ]] || { echo "route_id inválido"; exit 1; }
+              ARGS+=(--route-id "$IN_ROUTE_ID")
+            fi
+            [ "$IN_FORCE" = "true" ] && ARGS+=(--force)
           fi
-          python -m flight_sniper.main $ARGS
+          python -m flight_sniper.main "${ARGS[@]}"
 
   # Workflows agendados em repositórios públicos são desativados após 60 dias
   # sem atividade; isto reativa o agendamento automaticamente.

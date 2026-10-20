@@ -2,8 +2,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from flight_sniper.alerts import should_alert
-from flight_sniper.dates import all_combos, select_batch, trip_dates
+from flight_sniper.alerts import decide_alert
+from flight_sniper.dates import all_combos, sample_combos, trip_dates
 from flight_sniper.models import Route, ScheduleRule
 from flight_sniper.schedule import is_due
 
@@ -34,6 +34,8 @@ def make_route(**kw) -> Route:
         schedule=[ScheduleRule(0, 24, 2)],
         max_queries_per_run=60,
         notify_email=None,
+        ntfy_topic=None,
+        alert_floor=None,
         cursor=0,
         last_checked_at=None,
     )
@@ -96,51 +98,97 @@ class TestTripDates:
         assert len(all_combos(r, TODAY)) == 4
 
 
-class TestSelectBatch:
+class TestSampleCombos:
     def test_all_when_under_budget(self):
-        assert select_batch(list(range(5)), 3, 10) == ([0, 1, 2, 3, 4], 0)  # type: ignore[arg-type]
+        r = make_route(
+            window_start=date(2026, 12, 1), window_end=date(2026, 12, 12), min_stay_days=4, max_stay_days=4
+        )
+        combos, total = sample_combos(r, TODAY, 60)
+        assert total == 8 and len(combos) == 8
 
-    def test_rotates_and_wraps(self):
-        items = list(range(10))
-        b1, c1 = select_batch(items, 0, 4)  # type: ignore[arg-type]
-        b2, c2 = select_batch(items, c1, 4)  # type: ignore[arg-type]
-        b3, c3 = select_batch(items, c2, 4)  # type: ignore[arg-type]
-        assert b1 == [0, 1, 2, 3] and b2 == [4, 5, 6, 7] and b3 == [8, 9, 0, 1] and c3 == 2
+    def test_year_round_trip_is_spread_and_capped(self):
+        r = make_route(date_mode="rolling", horizon_days=330, min_stay_days=3, max_stay_days=10)
+        combos, total = sample_combos(r, TODAY, 60)
+        assert total == 330 * 8
+        assert len(combos) == 60
+        departs = [c.dates.depart for c in combos]
+        assert departs[0] == TODAY + timedelta(days=1)
+        assert departs[-1] == TODAY + timedelta(days=330)
+        assert len({d.weekday() for d in departs}) == 7
+        stays = {(c.dates.ret - c.dates.depart).days for c in combos if c.dates.ret}
+        assert stays == set(range(3, 11))
+
+    def test_budget_split_between_airport_pairs(self):
+        r = make_route(origins=["UDI", "CNF"], trip_type="one_way", date_mode="rolling", horizon_days=180)
+        combos, total = sample_combos(r, TODAY, 60)
+        assert total == 360 and len(combos) == 60
+        assert sum(c.origin == "UDI" for c in combos) == 30
+
+    def test_few_departures_many_stays(self):
+        r = make_route(
+            window_start=date(2026, 12, 1), window_end=date(2026, 12, 31), min_stay_days=1, max_stay_days=25
+        )
+        combos, total = sample_combos(r, TODAY, 60)
+        assert total > 60 and len(combos) <= 60
+        assert all(c.dates.ret <= date(2026, 12, 31) for c in combos)
 
 
 class TestSchedule:
     RULES = [ScheduleRule(0, 6, 1), ScheduleRule(6, 24, 2)]
 
-    def at(self, hour: int) -> datetime:
-        return datetime(2026, 10, 19, hour, 2, tzinfo=SP).astimezone(UTC)
+    def at(self, hour: int, minute: int = 2) -> datetime:
+        return datetime(2026, 10, 19, hour, minute, tzinfo=SP).astimezone(UTC)
 
     def test_never_checked(self):
         assert is_due(self.RULES, None, self.at(10), SP)
 
     def test_night_every_hour(self):
-        now = self.at(3)
-        assert is_due(self.RULES, now - timedelta(minutes=55), now, SP)
+        assert is_due(self.RULES, self.at(2, 40), self.at(3), SP)
+        assert not is_due(self.RULES, self.at(3, 1), self.at(3, 30), SP)
 
-    def test_day_every_two_hours(self):
-        now = self.at(14)
-        assert not is_due(self.RULES, now - timedelta(minutes=60), now, SP)
-        assert is_due(self.RULES, now - timedelta(minutes=110), now, SP)
+    def test_day_slots_are_fixed_clock_hours(self):
+        # faixa de 2h começando às 6h: 6h, 8h, 10h, 12h, 14h…
+        assert not is_due(self.RULES, self.at(14, 1), self.at(15), SP)
+        assert is_due(self.RULES, self.at(14, 1), self.at(16), SP)
+
+    def test_late_run_does_not_shift_next_slot(self):
+        # disparo atrasado às 13h50 cobre o horário das 12h; às 14h já está na vez
+        assert is_due(self.RULES, self.at(13, 50), self.at(14, 0), SP)
+
+    def test_early_trigger_counts_for_next_slot(self):
+        assert is_due(self.RULES, self.at(12, 1), self.at(13, 57), SP)
 
     def test_outside_any_window(self):
         rules = [ScheduleRule(8, 20, 1)]
         assert not is_due(rules, None, self.at(22), SP)
 
 
-class TestShouldAlert:
+T = Decimal("500")
+
+
+class TestDecideAlert:
     def test_above_target(self):
-        assert not should_alert(Decimal("600"), Decimal("500"), None)
+        d = decide_alert(Decimal("600"), T, None, complete=True)
+        assert not d.send and d.floor is None
 
     def test_first_alert(self):
-        assert should_alert(Decimal("450"), Decimal("500"), None)
+        d = decide_alert(Decimal("450"), T, None, complete=True)
+        assert d.send and d.floor == Decimal("450")
 
-    def test_suppressed_same_or_higher(self):
-        assert not should_alert(Decimal("450"), Decimal("500"), Decimal("450"))
-        assert not should_alert(Decimal("470"), Decimal("500"), Decimal("450"))
+    def test_same_or_higher_is_not_resent(self):
+        assert not decide_alert(Decimal("450"), T, Decimal("450"), complete=True).send
+        assert not decide_alert(Decimal("470"), T, Decimal("450"), complete=True).send
 
     def test_new_drop_alerts(self):
-        assert should_alert(Decimal("430"), Decimal("500"), Decimal("450"))
+        d = decide_alert(Decimal("430"), T, Decimal("450"), complete=True)
+        assert d.send and d.floor == Decimal("430")
+
+    def test_rise_above_target_then_drop_alerts_again(self):
+        up = decide_alert(Decimal("520"), T, Decimal("450"), complete=True)
+        assert not up.send and up.floor is None
+        assert decide_alert(Decimal("480"), T, up.floor, complete=True).send
+
+    def test_incomplete_run_keeps_episode(self):
+        d = decide_alert(Decimal("520"), T, Decimal("450"), complete=False)
+        assert not d.send and d.floor == Decimal("450")
+        assert decide_alert(None, T, Decimal("450"), complete=False).floor == Decimal("450")

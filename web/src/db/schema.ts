@@ -65,6 +65,13 @@ export const routes = pgTable("routes", {
     .default([{ from: 0, to: 24, every: 2 }]),
   maxQueriesPerRun: integer("max_queries_per_run").notNull().default(60),
   notifyEmail: text("notify_email"),
+  /** Tópico do ntfy.sh (opcional); o e-mail é sempre enviado. */
+  ntfyTopic: text("ntfy_topic"),
+  /**
+   * Menor preço já alertado no "episódio" atual abaixo da meta. Só realerta
+   * abaixo dele; volta a null quando o preço sobe acima da meta (worker).
+   */
+  alertFloor: numeric("alert_floor", { precision: 10, scale: 2 }),
 
   active: boolean("active").notNull().default(true),
   /** Posição da janela rotativa de combinações (worker). */
@@ -127,6 +134,7 @@ export const alerts = pgTable(
     departDate: date("depart_date").notNull(),
     returnDate: date("return_date"),
     emailTo: text("email_to").notNull(),
+    ntfyTopic: text("ntfy_topic"),
     providerId: text("provider_id"),
   },
   (t) => [index("alerts_route_sent_idx").on(t.routeId, t.sentAt)],

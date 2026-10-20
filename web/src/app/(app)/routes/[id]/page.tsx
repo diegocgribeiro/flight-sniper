@@ -13,7 +13,7 @@ import {
   stopsLabel,
   timeAgo,
 } from "@/lib/format";
-import { currentBestOptions, dailyMinSeries, getRoute, routeAlerts } from "@/lib/queries";
+import { dailyMinSeries, getRoute, historicalMin, lastScanOptions, routeAlerts } from "@/lib/queries";
 import { requireSession } from "@/lib/session";
 
 export default async function RoutePage(props: PageProps<"/routes/[id]">) {
@@ -23,10 +23,11 @@ export default async function RoutePage(props: PageProps<"/routes/[id]">) {
   const route = await getRoute(routeId);
   if (!route) notFound();
 
-  const [options, series, alerts] = await Promise.all([
-    currentBestOptions(routeId),
+  const [options, series, alerts, bestEver] = await Promise.all([
+    lastScanOptions(routeId),
     dailyMinSeries(routeId),
     routeAlerts(routeId),
+    historicalMin(routeId),
   ]);
   const target = Number(route.targetPrice);
   const rt = route.tripType === "round_trip";
@@ -54,10 +55,10 @@ export default async function RoutePage(props: PageProps<"/routes/[id]">) {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-4">
-        <Stat label="Melhor preço atual" value={money(options[0]?.price, route.currency)} good={!!options[0] && Number(options[0].price) < target} />
+        <Stat label="Última varredura" value={money(options[0]?.price, route.currency)} good={!!options[0] && Number(options[0].price) < target} />
+        <Stat label="Mínimo histórico" value={money(bestEver, route.currency)} good={bestEver != null && Number(bestEver) < target} />
         <Stat label="Preço alvo" value={money(target, route.currency)} />
-        <Stat label="Última checagem" value={timeAgo(route.lastCheckedAt)} />
-        <Stat label="Status" value={route.active ? "Ativa" : "Pausada"} />
+        <Stat label="Última checagem" value={`${timeAgo(route.lastCheckedAt)}${route.active ? "" : " · pausada"}`} />
       </div>
 
       <section className="card grid gap-2 p-5 text-sm sm:grid-cols-2">
@@ -67,7 +68,10 @@ export default async function RoutePage(props: PageProps<"/routes/[id]">) {
           👤 {route.adults} adulto(s) · {CABIN_LABEL[route.cabin]} ·{" "}
           {route.maxStops == null ? "qualquer nº de paradas" : `até ${stopsLabel(route.maxStops).toLowerCase()}`}
         </div>
-        <div>✉ {route.notifyEmail ?? process.env.ALERT_EMAIL ?? "—"}</div>
+        <div>
+          ✉ {route.notifyEmail ?? process.env.ALERT_EMAIL ?? "—"}
+          {route.ntfyTopic && <> · 🔔 ntfy: <span className="font-mono">{route.ntfyTopic}</span></>}
+        </div>
       </section>
 
       <section className="card p-5">
@@ -76,9 +80,9 @@ export default async function RoutePage(props: PageProps<"/routes/[id]">) {
       </section>
 
       <section className="card overflow-x-auto p-5">
-        <h2 className="mb-3 font-semibold">Melhores opções agora</h2>
+        <h2 className="mb-3 font-semibold">Resultados da última varredura</h2>
         {options.length === 0 ? (
-          <p className="text-sm text-muted">Nenhum resultado nas últimas 48h.</p>
+          <p className="text-sm text-muted">Nenhum resultado ainda.</p>
         ) : (
           <table className="w-full min-w-[640px] text-sm">
             <thead className="text-left text-xs uppercase text-muted">
@@ -123,7 +127,7 @@ export default async function RoutePage(props: PageProps<"/routes/[id]">) {
       <section className="card p-5">
         <h2 className="mb-3 font-semibold">Alertas enviados</h2>
         {alerts.length === 0 ? (
-          <p className="text-sm text-muted">Nenhum alerta ainda. Você recebe e-mail só quando o preço fica abaixo do alvo.</p>
+          <p className="text-sm text-muted">Nenhum alerta ainda. Você é avisado quando o preço fica abaixo do alvo e de novo a cada nova queda.</p>
         ) : (
           <ul className="space-y-1 text-sm">
             {alerts.map((a) => (

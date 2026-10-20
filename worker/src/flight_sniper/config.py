@@ -26,7 +26,7 @@ class Settings:
         app_url: URL pública do site, usada nos links do e-mail.
         timezone: Fuso usado para interpretar as faixas de horário das rotas.
         request_delay_seconds: Pausa entre buscas para não ser bloqueado.
-        alert_cooldown_hours: Janela de supressão de alertas repetidos.
+        ntfy_server: Servidor ntfy (público por padrão).
         max_consecutive_errors: Aborta a rota após N falhas seguidas (provável bloqueio).
     """
 
@@ -37,7 +37,7 @@ class Settings:
     app_url: str
     timezone: ZoneInfo
     request_delay_seconds: float
-    alert_cooldown_hours: int
+    ntfy_server: str
     max_consecutive_errors: int
 
     @classmethod
@@ -51,6 +51,6 @@ class Settings:
             app_url=os.environ.get("APP_URL", "").strip().rstrip("/"),
             timezone=ZoneInfo(os.environ.get("APP_TIMEZONE", "America/Sao_Paulo")),
             request_delay_seconds=float(os.environ.get("REQUEST_DELAY_SECONDS", "1.5")),
-            alert_cooldown_hours=int(os.environ.get("ALERT_COOLDOWN_HOURS", "24")),
+            ntfy_server=os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip(),
             max_consecutive_errors=int(os.environ.get("MAX_CONSECUTIVE_ERRORS", "5")),
         )

@@ -80,3 +80,43 @@ export const CABIN_LABEL: Record<string, string> = {
 export function stopsLabel(n: number): string {
   return n === 0 ? "Direto" : n === 1 ? "1 parada" : `${n} paradas`;
 }
+
+const HOUR = 3_600_000;
+/** Mesma antecipação tolerada pelo worker (schedule.py). */
+const LEAD = 5 * 60_000;
+
+function spHour(t: number): number {
+  return Number(
+    new Date(t).toLocaleString("en-US", { timeZone: "America/Sao_Paulo", hour: "numeric", hourCycle: "h23" }),
+  );
+}
+
+/**
+ * Próximo horário agendado da rota (espelha worker/flight_sniper/schedule.py).
+ * Retorna o horário atual se ele ainda não foi checado (busca pendente).
+ */
+export function nextCheck(rules: ScheduleRule[], last: Date | string | null, now = Date.now()): Date | null {
+  const lastT = last ? new Date(last).getTime() : null;
+  const hourStart = Math.floor(now / HOUR) * HOUR;
+  const ruleAt = (h: number) => rules.find((r) => r.from <= h && h < r.to);
+
+  const h0 = spHour(hourStart);
+  const cur = ruleAt(h0);
+  if (cur) {
+    const slotT = hourStart - ((h0 - cur.from) % cur.every) * HOUR;
+    if (lastT == null || lastT < slotT - LEAD) return new Date(slotT);
+  }
+  for (let i = 1; i <= 48; i++) {
+    const t = hourStart + i * HOUR;
+    const h = spHour(t);
+    const r = ruleAt(h);
+    if (r && (h - r.from) % r.every === 0) return new Date(t);
+  }
+  return null;
+}
+
+export function fmtNextCheck(d: Date | null, now = Date.now()): string {
+  if (!d) return "fora das faixas";
+  const hhmm = d.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" });
+  return d.getTime() <= now ? `pendente (${hhmm})` : hhmm;
+}

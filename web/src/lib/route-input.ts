@@ -16,6 +16,15 @@ const iataList = z
       .max(5, "Máximo de 5 aeroportos"),
   );
 
+/** Tópicos do ntfy.sh são públicos: quem souber o nome lê as mensagens. */
+export const ntfyTopic = z.preprocess(
+  (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : null),
+  z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{6,64}$/, "Use 6–64 letras, números, - ou _ (sem espaços)")
+    .nullable(),
+);
+
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Data inválida");
 const optInt = (min: number, max: number) =>
   z.preprocess(
@@ -52,10 +61,8 @@ export const routeInputSchema = z
     maxStops: optInt(0, 3),
     schedule: z.array(scheduleRule).min(1, "Defina ao menos uma faixa de horário"),
     maxQueriesPerRun: z.preprocess((v) => Number(v), z.number().int().min(1).max(300)),
-    notifyEmail: z.preprocess(
-      (v) => (v === "" || v == null ? null : v),
-      z.email("E-mail inválido").nullable(),
-    ),
+    notifyEmail: z.string({ error: "Informe o e-mail do alerta" }).trim().pipe(z.email("E-mail inválido")),
+    ntfyTopic,
     active: z.boolean(),
   })
   .superRefine((r, ctx) => {
@@ -126,6 +133,7 @@ export function parseRouteForm(fd: FormData) {
     schedule,
     maxQueriesPerRun: str("maxQueriesPerRun") ?? "60",
     notifyEmail: str("notifyEmail"),
+    ntfyTopic: str("ntfyTopic"),
     active: fd.get("active") === "on",
   });
 }

@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from datetime import date, timedelta
+from typing import TypeVar
 
 from .models import Combo, Route, TripDates
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 def _days(start: date, end: date) -> Iterator[date]:
@@ -78,25 +81,65 @@ def all_combos(route: Route, today: date) -> list[Combo]:
     return [Combo(o, d, td) for td in dates for o in route.origins for d in route.destinations if o != d]
 
 
-def select_batch(combos: list[Combo], cursor: int, budget: int) -> tuple[list[Combo], int]:
-    """Seleciona a fatia desta execução numa janela rotativa.
+def _spread(items: list[T], k: int) -> list[T]:
+    """Escolhe ``k`` itens distribuídos uniformemente (inclui as pontas)."""
+    n = len(items)
+    if k >= n:
+        return list(items)
+    if k <= 0:
+        return []
+    if k == 1:
+        return [items[n // 2]]
+    return [items[round(i * (n - 1) / (k - 1))] for i in range(k)]
 
-    Quando há mais combinações que o orçamento, cada execução cobre a próxima
-    fatia e o cursor avança; após N/budget execuções tudo foi visto uma vez.
+
+def sample_combos(route: Route, today: date, budget: int) -> tuple[list[Combo], int]:
+    """Combinações desta execução, limitadas a ``budget`` buscas.
+
+    Quando o total cabe no orçamento, busca tudo. Caso contrário monta uma amostra
+    representativa em vez de varrer só o começo do período:
+
+    * as datas de ida são espalhadas uniformemente pelo período inteiro (o passo
+      fracionário alterna os dias da semana);
+    * cada ida recebe uma duração, alternando entre mín. e máx., para que todas
+      as durações apareçam ao longo do período;
+    * a mesma grade de datas é usada para cada par de aeroportos.
+
+    Assim uma única execução já dá a estimativa de preço do período todo.
 
     Args:
-        combos: Todas as combinações (ordem estável).
-        cursor: Posição salva da execução anterior.
+        route: Rota a expandir.
+        today: Data local de referência.
         budget: Máximo de buscas permitidas nesta execução.
 
     Returns:
-        Tupla (fatia a buscar, novo cursor).
+        Tupla (combinações a buscar, total de combinações possíveis).
     """
-    n = len(combos)
-    if n == 0:
+    pairs = [(o, d) for o in route.origins for d in route.destinations if o != d]
+    dates = trip_dates(route, today)
+    total = len(dates) * len(pairs)
+    if total <= budget:
+        return [Combo(o, d, td) for td in dates for o, d in pairs], total
+    if not pairs:
         return [], 0
-    if n <= budget:
-        return list(combos), 0
-    start = cursor % n
-    batch = [combos[(start + i) % n] for i in range(budget)]
-    return batch, (start + budget) % n
+
+    per_pair = max(1, budget // len(pairs))
+    by_depart: dict[date, list[TripDates]] = {}
+    for td in dates:
+        by_depart.setdefault(td.depart, []).append(td)
+    departs = sorted(by_depart)
+
+    chosen: list[TripDates] = []
+    if len(departs) >= per_pair:
+        for i, dep in enumerate(_spread(departs, per_pair)):
+            options = by_depart[dep]
+            chosen.append(options[i % len(options)])
+    else:
+        # Poucas idas e muitas durações: várias durações por ida, também espalhadas.
+        per_depart = per_pair // len(departs)
+        extra = per_pair % len(departs)
+        for i, dep in enumerate(departs):
+            chosen.extend(_spread(by_depart[dep], per_depart + (1 if i < extra else 0)))
+
+    combos = [Combo(o, d, td) for td in sorted(chosen) for o, d in pairs]
+    return combos[:budget], total

@@ -14,16 +14,16 @@ import random
 import sys
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import psycopg
 
 from . import db
-from .alerts import render_email, send_email, should_alert
+from .alerts import decide_alert, render_email, render_push, send_email, send_ntfy
 from .config import Settings
-from .dates import all_combos, select_batch
+from .dates import sample_combos
 from .models import Offer, Route
 from .schedule import is_due
 from .search import SearchError, search_combo
@@ -48,23 +48,17 @@ def process_route(
     run_id: UUID | None,
     now: datetime,
 ) -> RouteResult:
-    """Busca a fatia da vez de uma rota, persiste e decide o alerta.
+    """Busca a amostra de combinações de uma rota, persiste e decide o alerta.
 
-    Idempotência: cada execução só insere observações novas (append-only) e
-    o alerta é deduplicado pelo histórico em ``alerts``; reexecutar não duplica e-mails.
+    Idempotência: cada execução só insere observações novas (append-only) e o
+    alerta depende do piso do episódio gravado em ``routes.alert_floor``;
+    reexecutar com o mesmo preço não reenvia notificação.
     """
     result = RouteResult()
     today = now.astimezone(settings.timezone).date()
-    combos = all_combos(route, today)
-    batch, next_cursor = select_batch(combos, route.cursor, route.max_queries_per_run)
+    batch, total = sample_combos(route, today, route.max_queries_per_run)
     logger.info(
-        "Rota #%d '%s': %d combinações, buscando %d (cursor %d→%d)",
-        route.id,
-        route.name,
-        len(combos),
-        len(batch),
-        route.cursor,
-        next_cursor,
+        "Rota #%d '%s': %d combinações possíveis, buscando %d", route.id, route.name, total, len(batch)
     )
     if not batch:
         logger.warning("Rota #%d sem datas válidas (período no passado?)", route.id)
@@ -107,37 +101,87 @@ def process_route(
         return result
 
     db.insert_offers(conn, route.id, run_id, offers)
-    # Se abortou, não avança o cursor: a fatia será retentada na próxima execução.
-    db.mark_checked(conn, route.id, route.cursor if result.aborted else next_cursor, now)
+    db.mark_checked(conn, route.id, 0, now)
 
     below = sorted((o for o in offers if o.price < route.target_price), key=lambda o: o.price)
-    if not below:
+    best_price = min((o.price for o in offers), default=None)
+    decision = decide_alert(
+        best_price,
+        route.target_price,
+        route.alert_floor,
+        complete=not result.aborted and result.errors == 0,
+    )
+    if not decision.send:
+        if decision.floor != route.alert_floor:
+            db.set_alert_floor(conn, route.id, decision.floor)
+            logger.info("Rota #%d: preço voltou acima da meta, próximo recuo abaixo dela alerta", route.id)
+        elif below:
+            logger.info(
+                "Rota #%d: %s abaixo da meta, mas não menor que o já alertado (%s)",
+                route.id,
+                below[0].price,
+                route.alert_floor,
+            )
         return result
 
-    best = below[0]
-    recent = db.recent_alert_min_price(conn, route.id, timedelta(hours=settings.alert_cooldown_hours))
-    if not should_alert(best.price, route.target_price, recent):
-        logger.info(
-            "Rota #%d: %s abaixo da meta, mas já alertado (mín. recente %s)", route.id, best.price, recent
-        )
-        return result
-
-    to = route.notify_email or settings.alert_email
-    if not settings.resend_api_key or not to:
-        logger.warning("Alerta não enviado: RESEND_API_KEY ou e-mail de destino ausente")
-        return result
-
-    subject, body = render_email(route, below[:ALERT_TOP_N], settings.app_url)
-    try:
-        provider_id = send_email(settings.resend_api_key, settings.resend_from, to, subject, body)
-    except RuntimeError as exc:
-        logger.error("Falha ao enviar e-mail: %s", exc)
+    if notify(settings, route, below[:ALERT_TOP_N], run_id, conn):
+        db.set_alert_floor(conn, route.id, decision.floor)
+        result.alert_sent = True
+    else:
         result.errors += 1
-        return result
-    db.insert_alert(conn, route.id, run_id, best, to, provider_id)
-    result.alert_sent = True
-    logger.info("Alerta enviado para rota #%d: %s", route.id, best.price)
     return result
+
+
+def notify(
+    settings: Settings,
+    route: Route,
+    offers: list[Offer],
+    run_id: UUID,
+    conn: psycopg.Connection[dict[str, Any]],
+) -> bool:
+    """Envia o alerta por e-mail (obrigatório) e ntfy (opcional).
+
+    Os canais são independentes: a falha de um não impede o outro.
+
+    Returns:
+        True se ao menos um canal entregou (o piso do episódio só avança nesse caso,
+        senão o mesmo preço seria tentado de novo na próxima execução).
+    """
+    best = offers[0]
+    to = route.notify_email or settings.alert_email
+    provider_id: str | None = None
+    email_ok = ntfy_ok = False
+
+    if settings.resend_api_key and to:
+        subject, body = render_email(route, offers, settings.app_url)
+        try:
+            provider_id = send_email(settings.resend_api_key, settings.resend_from, to, subject, body)
+            email_ok = True
+        except (RuntimeError, OSError) as exc:
+            logger.error("Falha ao enviar e-mail da rota #%d: %s", route.id, exc)
+    else:
+        logger.warning("E-mail não enviado: RESEND_API_KEY ou destinatário ausente")
+
+    if route.ntfy_topic:
+        try:
+            send_ntfy(settings.ntfy_server, route.ntfy_topic, render_push(route, offers, settings.app_url))
+            ntfy_ok = True
+        except RuntimeError as exc:
+            logger.error("Falha ao publicar no ntfy da rota #%d: %s", route.id, exc)
+
+    if not (email_ok or ntfy_ok):
+        return False
+    db.insert_alert(
+        conn,
+        route.id,
+        run_id,
+        best,
+        to if email_ok else "",
+        provider_id,
+        route.ntfy_topic if ntfy_ok else None,
+    )
+    logger.info("Alerta da rota #%d: %s (e-mail=%s, ntfy=%s)", route.id, best.price, email_ok, ntfy_ok)
+    return True
 
 
 def run(route_id: int | None, force: bool, dry_run: bool, trigger: str) -> int:

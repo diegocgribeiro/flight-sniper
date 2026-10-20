@@ -7,6 +7,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
@@ -15,24 +16,51 @@ from .models import Offer, Route
 logger = logging.getLogger(__name__)
 
 RESEND_URL = "https://api.resend.com/emails"
+USER_AGENT = "flight-sniper/0.2"
 WEEKDAYS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 
 
-def should_alert(best_price: Decimal, target: Decimal, recent_alerted_min: Decimal | None) -> bool:
-    """Alerta só abaixo da meta e quando o preço é novidade.
+@dataclass(frozen=True)
+class AlertDecision:
+    """Resultado da regra de alerta.
+
+    Attributes:
+        send: Se a notificação deve ser enviada agora.
+        floor: Novo "piso" do episódio (menor preço já alertado enquanto o
+            preço segue abaixo da meta). ``None`` encerra o episódio.
+    """
+
+    send: bool
+    floor: Decimal | None
+
+
+def decide_alert(
+    best_price: Decimal | None, target: Decimal, floor: Decimal | None, *, complete: bool
+) -> AlertDecision:
+    """Decide se alerta, tratando cada período abaixo da meta como um "episódio".
+
+    Regras:
+        * acima (ou igual) da meta: não alerta e encerra o episódio, então a
+          próxima vez que cair abaixo da meta alerta de novo;
+        * abaixo da meta, primeira vez no episódio: alerta;
+        * abaixo da meta e menor que o último alertado: alerta (nova queda);
+        * abaixo da meta, igual ou maior que o último alertado: não reenvia.
 
     Args:
-        best_price: Menor preço encontrado nesta execução.
+        best_price: Menor preço da execução (``None`` se não houve resultado).
         target: Preço alvo da rota.
-        recent_alerted_min: Menor preço já alertado dentro do cooldown (ou None).
-
-    Returns:
-        True se o e-mail deve ser enviado. Um preço igual ou maior ao já
-        alertado no cooldown é suprimido; uma nova queda sempre alerta.
+        floor: Piso do episódio atual (``None`` = fora de episódio).
+        complete: Se a varredura cobriu todas as combinações sem erro. Uma
+            varredura incompleta nunca encerra o episódio (o preço baixo pode
+            só não ter sido consultado).
     """
+    if best_price is None:
+        return AlertDecision(False, floor if not complete else None)
     if best_price >= target:
-        return False
-    return recent_alerted_min is None or best_price < recent_alerted_min
+        return AlertDecision(False, None if complete else floor)
+    if floor is None or best_price < floor:
+        return AlertDecision(True, best_price)
+    return AlertDecision(False, floor)
 
 
 def _money(v: Decimal, currency: str) -> str:
@@ -96,7 +124,7 @@ def send_email(api_key: str, sender: str, to: str, subject: str, body_html: str)
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "flight-sniper/0.1",
+            "User-Agent": USER_AGENT,
         },
     )
     try:
@@ -106,3 +134,48 @@ def send_email(api_key: str, sender: str, to: str, subject: str, body_html: str)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
         raise RuntimeError(f"Resend HTTP {exc.code}: {detail}") from exc
+
+
+def render_push(route: Route, offers: list[Offer], app_url: str) -> dict[str, object]:
+    """Monta o payload JSON do ntfy (título, texto e link) sem o tópico."""
+    best = offers[0]
+    rt = best.combo.dates.ret is not None
+    arrow = "⇄" if rt else "→"
+    lines = [
+        f"{_money(o.price, o.currency)} · {o.combo.origin}{arrow}{o.combo.destination} · "
+        f"{_d(o.combo.dates.depart)}{' – ' + _d(o.combo.dates.ret) if o.combo.dates.ret else ''}"
+        f" · {', '.join(o.airlines) or '—'}"
+        for o in offers[:3]
+    ]
+    payload: dict[str, object] = {
+        "title": f"✈ {route.name}: {_money(best.price, best.currency)} (meta {_money(route.target_price, route.currency)})",
+        "message": "\n".join(lines),
+        "priority": 4,
+        "tags": ["airplane", "moneybag"],
+        "click": f"{app_url}/routes/{route.id}" if app_url else best.url,
+        "actions": [{"action": "view", "label": "Google Flights", "url": best.url}],
+    }
+    return payload
+
+
+def send_ntfy(server: str, topic: str, payload: dict[str, object]) -> None:
+    """Publica no ntfy pela API JSON (aceita UTF-8 no título, ao contrário dos headers).
+
+    Raises:
+        RuntimeError: Se o servidor recusar a publicação.
+    """
+    data = json.dumps({"topic": topic, **payload}).encode()
+    req = urllib.request.Request(
+        server.rstrip("/") + "/",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            return
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise RuntimeError(f"ntfy HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"ntfy indisponível: {exc.reason}") from exc

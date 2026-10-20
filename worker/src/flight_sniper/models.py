@@ -45,6 +45,8 @@ class Route:
     schedule: list[ScheduleRule]
     max_queries_per_run: int
     notify_email: str | None
+    ntfy_topic: str | None
+    alert_floor: Decimal | None
     cursor: int
     last_checked_at: datetime | None
 
