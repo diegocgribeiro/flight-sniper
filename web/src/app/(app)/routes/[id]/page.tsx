@@ -13,7 +13,7 @@ import {
   stopsLabel,
   timeAgo,
 } from "@/lib/format";
-import { dailyMinSeries, getRoute, historicalMin, lastScanOptions, routeAlerts } from "@/lib/queries";
+import { getRoute, historicalMin, lastScanOptions, routeAlerts, runMinSeries } from "@/lib/queries";
 import { requireSession } from "@/lib/session";
 
 export default async function RoutePage(props: PageProps<"/routes/[id]">) {
@@ -25,7 +25,7 @@ export default async function RoutePage(props: PageProps<"/routes/[id]">) {
 
   const [options, series, alerts, bestEver] = await Promise.all([
     lastScanOptions(routeId),
-    dailyMinSeries(routeId),
+    runMinSeries(routeId),
     routeAlerts(routeId),
     historicalMin(routeId),
   ]);
@@ -75,7 +75,7 @@ export default async function RoutePage(props: PageProps<"/routes/[id]">) {
       </section>
 
       <section className="card p-5">
-        <h2 className="mb-3 font-semibold">Menor preço por dia (30 dias)</h2>
+        <h2 className="mb-3 font-semibold">Menor preço por varredura</h2>
         <PriceChart data={series} target={target} currency={route.currency} />
       </section>
 

@@ -66,16 +66,25 @@ export async function lastScanOptions(routeId: number, limit = 12) {
   }[];
 }
 
-/** Menor preço por dia (fuso de São Paulo) nos últimos N dias, para o gráfico. */
-export async function dailyMinSeries(routeId: number, days = 30) {
+/**
+ * Menor preço de cada varredura (as últimas N execuções que gravaram preços da rota),
+ * em ordem cronológica, para o gráfico. `label` vem formatado no horário de São Paulo.
+ */
+export async function runMinSeries(routeId: number, limit = 120) {
   const res = await db().execute(sql`
-    select to_char(date_trunc('day', checked_at at time zone 'America/Sao_Paulo'), 'YYYY-MM-DD') as day,
-           min(price)::float as price
-    from ${priceChecks}
-    where route_id = ${routeId} and checked_at > now() - make_interval(days => ${days})
-    group by 1 order by 1
+    select at, label, price from (
+      select min(checked_at) as at,
+             to_char(min(checked_at) at time zone 'America/Sao_Paulo', 'DD/MM HH24:MI') as label,
+             min(price)::float as price
+      from ${priceChecks}
+      where route_id = ${routeId} and run_id is not null
+      group by run_id
+      order by at desc
+      limit ${limit}
+    ) r
+    order by at
   `);
-  return res.rows as { day: string; price: number }[];
+  return res.rows as { at: string; label: string; price: number }[];
 }
 
 /** Menor preço já visto para a rota (todo o histórico guardado). */

@@ -1,12 +1,13 @@
 import { money } from "@/lib/format";
 
-/** Gráfico SVG simples: menor preço por dia vs. linha do preço alvo. */
+/** Gráfico SVG simples: menor preço de cada varredura vs. linha do preço alvo. */
 export function PriceChart({
   data,
   target,
   currency,
 }: {
-  data: { day: string; price: number }[];
+  /** `label`: data/hora da varredura (DD/MM HH:MM, horário de São Paulo). */
+  data: { at: string; label: string; price: number }[];
   target: number;
   currency: string;
 }) {
@@ -23,10 +24,9 @@ export function PriceChart({
   const y = (v: number) => P.t + ((hi - v) * (H - P.t - P.b)) / (hi - lo || 1);
   const path = data.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d.price).toFixed(1)}`).join(" ");
   const ticks = [lo, (lo + hi) / 2, hi];
-  const fmtDay = (s: string) => `${s.slice(8, 10)}/${s.slice(5, 7)}`;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" role="img" aria-label="Histórico do menor preço por dia">
+    <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" role="img" aria-label="Histórico do menor preço por varredura">
       {ticks.map((t) => (
         <g key={t}>
           <line x1={P.l} x2={W - P.r} y1={y(t)} y2={y(t)} stroke="var(--line)" />
@@ -48,15 +48,29 @@ export function PriceChart({
       </text>
       <path d={path} fill="none" stroke="var(--brand)" strokeWidth="2" strokeLinejoin="round" />
       {data.map((d, i) => (
-        <circle key={d.day} cx={x(i)} cy={y(d.price)} r="3" fill={d.price < target ? "var(--good)" : "var(--brand)"}>
-          <title>{`${fmtDay(d.day)}: ${money(d.price, currency)}`}</title>
+        <circle
+          key={d.at}
+          cx={x(i)}
+          cy={y(d.price)}
+          r={data.length > 60 ? 2 : 3}
+          fill={d.price < target ? "var(--good)" : "var(--brand)"}
+        >
+          <title>{`${d.label}: ${money(d.price, currency)}`}</title>
         </circle>
       ))}
-      {[0, Math.floor((data.length - 1) / 2), data.length - 1]
+      {[0, 1, 2, 3]
+        .map((k) => Math.round((k * (data.length - 1)) / 3))
         .filter((v, i, a) => a.indexOf(v) === i)
-        .map((i) => (
-          <text key={i} x={x(i)} y={H - 6} textAnchor="middle" fontSize="11" fill="var(--muted)">
-            {fmtDay(data[i].day)}
+        .map((i, k, arr) => (
+          <text
+            key={i}
+            x={x(i)}
+            y={H - 6}
+            textAnchor={arr.length > 1 && k === 0 ? "start" : arr.length > 1 && k === arr.length - 1 ? "end" : "middle"}
+            fontSize="11"
+            fill="var(--muted)"
+          >
+            {data[i].label}
           </text>
         ))}
     </svg>
